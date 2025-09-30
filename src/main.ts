@@ -16,6 +16,13 @@ interface AutoNodeConfig {
 
 const AUTO_NODE_MARKER_START = "<!-- auto-node:start -->";
 const AUTO_NODE_MARKER_END = "<!-- auto-node:end -->";
+const AUTO_NODE_INTRO = [
+  "# Auto Node",
+  "An auto node is a special Obsidian .md note that will aggregate all your notes that contain a keyword of your choosing across your vault.",
+  "Go to the Auto-node readme.md for more information.",
+  "___",
+  "",
+].join("\n");
 
 export default class AutoNodePlugin extends Plugin {
   private refreshTimeout: number | null = null;
@@ -31,6 +38,7 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof TFile && file.extension === "md") {
+          console.debug(`[auto-node] Detected modify: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -39,6 +47,7 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (file instanceof TFile && file.extension === "md") {
+          console.debug(`[auto-node] Detected create: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -47,6 +56,16 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile && file.extension === "md") {
+          console.debug(`[auto-node] Detected delete: ${file.path}`);
+          this.scheduleRefresh();
+        }
+      }),
+    );
+
+    this.registerEvent(
+      this.app.vault.on("rename", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          console.debug(`[auto-node] Detected rename: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -55,6 +74,7 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
         if (file instanceof TFile && file.extension === "md") {
+          console.debug(`[auto-node] Metadata changed: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -78,6 +98,7 @@ export default class AutoNodePlugin extends Plugin {
     }
     this.refreshTimeout = window.setTimeout(() => {
       this.refreshTimeout = null;
+      console.debug("[auto-node] Refresh timer fired");
       this.refreshAllAutoNodes().catch((err) => {
         console.error("AutoNode refresh failed", err);
         new Notice("Auto-node refresh failed. Check console for details.");
@@ -157,6 +178,7 @@ export default class AutoNodePlugin extends Plugin {
       `autoNodeMatchWholeWord: ${config.matchWholeWord}`,
       "---",
       "",
+      AUTO_NODE_INTRO,
       `<!-- Auto-node keyword: ${config.keyword} -->`,
       AUTO_NODE_MARKER_START,
       "_Collecting links..._",
@@ -216,7 +238,7 @@ export default class AutoNodePlugin extends Plugin {
         }
 
         const content = await this.app.vault.cachedRead(otherFile);
-        if (this.containsKeyword(content, config)) {
+        if (this.containsKeyword(otherFile, content, config)) {
           console.debug(`[auto-node] Match found in ${otherFile.path} for keyword '${config.keyword}' in ${file.path}`);
           matches.push(
             this.app.fileManager.generateMarkdownLink(
@@ -232,8 +254,12 @@ export default class AutoNodePlugin extends Plugin {
         ? matches.map((link) => `- ${link}`).join("\n")
         : "_No matching notes yet._";
 
-      const current = await this.app.vault.read(file);
-      const next = this.mergeGeneratedSection(current, generatedSection, config.keyword);
+      console.debug(
+        `[auto-node] Refresh results for ${file.path}: ${matches.length} matches`,
+      );
+
+    const current = await this.app.vault.read(file);
+    const next = this.mergeGeneratedSection(current, generatedSection, config.keyword);
 
       if (current !== next) {
         await this.app.vault.modify(file, next);
@@ -246,28 +272,33 @@ export default class AutoNodePlugin extends Plugin {
     }
   }
 
-  private containsKeyword(content: string, config: AutoNodeConfig) {
+  private containsKeyword(file: TFile, content: string, config: AutoNodeConfig) {
     const keyword = config.caseSensitive ? config.keyword : config.keyword.toLowerCase();
     const haystack = config.caseSensitive ? content : content.toLowerCase();
+    const titleHaystack = config.caseSensitive
+      ? file.basename
+      : file.basename.toLowerCase();
+    const pathHaystack = config.caseSensitive ? file.path : file.path.toLowerCase();
 
     if (!config.matchWholeWord) {
-      return haystack.includes(keyword);
+      return haystack.includes(keyword) || titleHaystack.includes(keyword) || pathHaystack.includes(keyword);
     }
 
     const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const flags = config.caseSensitive ? "g" : "gi";
     const regex = new RegExp(`\\b${escaped}\\b`, flags);
-    return regex.test(content);
+    return regex.test(content) || regex.test(file.basename) || regex.test(file.path);
   }
 
   private mergeGeneratedSection(current: string, generated: string, keyword: string) {
-    let next = current;
+    let next = this.normalizeMarkers(current);
 
-    if (!current.includes(AUTO_NODE_MARKER_START) || !current.includes(AUTO_NODE_MARKER_END)) {
+    next = this.ensureIntroSection(next);
+
+    if (!next.includes(AUTO_NODE_MARKER_START) || !next.includes(AUTO_NODE_MARKER_END)) {
       next = [
-        current.trimEnd(),
+        next.trimEnd(),
         "",
-        `<!-- Auto-node keyword: ${keyword} -->`,
         AUTO_NODE_MARKER_START,
         AUTO_NODE_MARKER_END,
         "",
@@ -285,6 +316,33 @@ export default class AutoNodePlugin extends Plugin {
     const after = next.slice(endIndex);
 
     return `${before}\n\n${generated}\n\n${after.trimStart()}`.trimEnd() + "\n";
+  }
+
+  private normalizeMarkers(content: string) {
+    return content
+      .replace(/<!--\s*auto-node:start\s*-->/gi, AUTO_NODE_MARKER_START)
+      .replace(/<!--\s*auto-node:end\s*-->/gi, AUTO_NODE_MARKER_END);
+  }
+
+  private ensureIntroSection(content: string) {
+    if (content.includes("# Auto Node")) {
+      return content;
+    }
+
+    const frontmatterMatch = content.match(/^---[\s\S]*?\n---\n?/);
+    if (frontmatterMatch) {
+      const frontmatter = frontmatterMatch[0];
+      const rest = content.slice(frontmatter.length).trimStart();
+      const body = rest ? `\n${rest}` : "";
+      return `${frontmatter}${AUTO_NODE_INTRO}${body}`.trimEnd() + "\n";
+    }
+
+    const trimmed = content.trimStart();
+    if (!trimmed) {
+      return `${AUTO_NODE_INTRO}`;
+    }
+
+    return `${AUTO_NODE_INTRO}\n${trimmed}`;
   }
 
   private readAutoNodeConfig(file: TFile): AutoNodeConfig | null {
