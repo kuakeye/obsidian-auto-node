@@ -23,12 +23,12 @@ The new note will contain frontmatter such as:
 ```
 ---
 autoNode: true
-autoNodeKeyword: addiction
+autoNodeKeyword: neurostimulation
 autoNodeCaseSensitive: false
 autoNodeMatchWholeWord: false
 ---
 
-<!-- Auto-node keyword: addiction -->
+<!-- Auto-node keyword: neurostimulation -->
 <!-- auto-node:start -->
 _Collecting links..._
 <!-- auto-node:end -->
