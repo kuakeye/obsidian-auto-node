@@ -1,0 +1,29 @@
+{
+  "name": "obsidian-auto-node",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to automatically maintain keyword-based MOC pages",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs --watch",
+    "build": "node esbuild.config.mjs",
+    "check": "tsc --noEmit",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "moc",
+    "automation"
+  ],
+  "author": "clarkye",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "esbuild": "^0.21.5",
+    "fs-extra": "^11.2.0",
+    "obsidian": "latest",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.4"
+  }
+}
+

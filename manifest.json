@@ -1,0 +1,11 @@
+{
+  "id": "auto-node",
+  "name": "Auto Node",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.16",
+  "description": "Automatically maintain MOC pages populated with links to notes mentioning a keyword.",
+  "author": "clarkye",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
+
