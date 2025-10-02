@@ -4,8 +4,13 @@ import {
   Modal,
   Notice,
   Plugin,
+  Setting,
   TFile,
+  ToggleComponent,
+  WorkspaceLeaf,
   normalizePath,
+  parseYaml,
+  stringifyYaml,
 } from "obsidian";
 
 interface AutoNodeConfig {
@@ -20,6 +25,7 @@ interface AutoNodeRecord extends AutoNodeConfig {
 
 interface AutoNodeSettings {
   nodes: Record<string, AutoNodeRecord>;
+  graphFilterEnabled: boolean;
 }
 
 const AUTO_NODE_MARKER_START = "<!-- auto-node:start -->";
@@ -35,8 +41,9 @@ const AUTO_NODE_INTRO = [
 export default class AutoNodePlugin extends Plugin {
   private refreshTimeout: number | null = null;
   private isUpdating: Set<string> = new Set();
-  private settings: AutoNodeSettings = { nodes: {} };
+  private settings: AutoNodeSettings = { nodes: {}, graphFilterEnabled: false };
   private nodeRecords: Map<string, AutoNodeRecord> = new Map();
+  private graphFilters: Map<WorkspaceLeaf, GraphFilterControl> = new Map();
 
   async onload() {
     await this.loadSettings();
@@ -97,7 +104,14 @@ export default class AutoNodePlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       this.scheduleRefresh(100);
+      this.enhanceGraphLeaves();
     });
+
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => {
+        this.enhanceGraphLeaves();
+      }),
+    );
   }
 
   onunload() {
@@ -105,6 +119,8 @@ export default class AutoNodePlugin extends Plugin {
       window.clearTimeout(this.refreshTimeout);
       this.refreshTimeout = null;
     }
+
+    this.cleanupGraphFilters();
   }
 
   private scheduleRefresh(delay = 500) {
@@ -159,27 +175,33 @@ export default class AutoNodePlugin extends Plugin {
     const fileName = this.ensureMarkdownExtension(name.trim());
     const normalized = this.getTargetFilePath(fileName);
 
-    const existing = this.app.vault.getAbstractFileByPath(normalized);
-    if (existing instanceof TFile) {
-      new Notice(`File '${fileName}' already exists.`);
-      return;
-    }
-
     const config: AutoNodeConfig = {
       keyword: keyword.trim(),
       caseSensitive: this.isYes(caseSensitiveChoice),
       matchWholeWord: this.isYes(matchWholeWordChoice),
     };
 
-    const content = this.buildInitialContent(config);
-
     try {
-      new Notice(`Creating auto-node at ${normalized}`, 4000);
-      const file = await this.app.vault.create(normalized, content);
+      const existing = this.app.vault.getAbstractFileByPath(normalized);
+      let file: TFile;
+
+      if (existing instanceof TFile) {
+        file = existing;
+        await this.ensureAutoNodeFrontmatter(file, config);
+        await this.ensureMarkers(file, config.keyword);
+        new Notice(`Converted existing note '${file.basename}' into an auto-node.`, 5000);
+      } else {
+        const content = this.buildInitialContent(config);
+        new Notice(`Creating auto-node at ${normalized}`, 4000);
+        file = await this.app.vault.create(normalized, content);
+      }
+
       this.upsertAutoNodeRecord(normalized, config);
       await this.refreshAutoNode(file);
       await this.openFile(file);
-      new Notice(`Created auto-node '${file.basename}' at ${normalized}.`, 5000);
+      if (!(existing instanceof TFile)) {
+        new Notice(`Created auto-node '${file.basename}' at ${normalized}.`, 5000);
+      }
     } catch (error) {
       console.error(error);
       const message = error instanceof Error ? error.message : String(error);
@@ -348,7 +370,7 @@ export default class AutoNodePlugin extends Plugin {
 
   private async loadSettings() {
     const data = (await this.loadData()) as AutoNodeSettings | null;
-    this.settings = data ?? { nodes: {} };
+    this.settings = data ?? { nodes: {}, graphFilterEnabled: false };
     this.nodeRecords = new Map(
       Object.values(this.settings.nodes ?? {}).map((record) => [record.path, record]),
     );
@@ -418,6 +440,140 @@ export default class AutoNodePlugin extends Plugin {
       caseSensitive,
       matchWholeWord,
     };
+  }
+
+  private async ensureAutoNodeFrontmatter(file: TFile, config: AutoNodeConfig) {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatterBlock = cache?.frontmatterPosition;
+    const original = await this.app.vault.read(file);
+
+    if (!frontmatterBlock) {
+      const fm = stringifyYaml({
+        autoNode: true,
+        autoNodeKeyword: config.keyword,
+        autoNodeCaseSensitive: config.caseSensitive,
+        autoNodeMatchWholeWord: config.matchWholeWord,
+      });
+      const next = `---\n${fm}---\n\n${original.trimStart()}`;
+      await this.app.vault.modify(file, next);
+      return;
+    }
+
+    const frontmatterLines = original
+      .slice(frontmatterBlock.start.offset, frontmatterBlock.end.offset)
+      .split("\n")
+      .map((line) => line.replace(/^---/, "").trim())
+      .filter(Boolean);
+
+    const frontmatterObj = parseYaml(frontmatterLines.join("\n")) ?? {};
+    frontmatterObj.autoNode = true;
+    frontmatterObj.autoNodeKeyword = config.keyword;
+    frontmatterObj.autoNodeCaseSensitive = config.caseSensitive;
+    frontmatterObj.autoNodeMatchWholeWord = config.matchWholeWord;
+
+    const fm = stringifyYaml(frontmatterObj).trimEnd();
+    const before = original.slice(0, frontmatterBlock.start.offset);
+    const after = original.slice(frontmatterBlock.end.offset).trimStart();
+    const next = `${before}---\n${fm}\n---\n\n${after}`;
+    await this.app.vault.modify(file, next);
+  }
+
+  private async ensureMarkers(file: TFile, keyword: string) {
+    const content = await this.app.vault.read(file);
+    if (content.includes(AUTO_NODE_MARKER_START) && content.includes(AUTO_NODE_MARKER_END)) {
+      return;
+    }
+
+    const body = content.trimEnd();
+    const addition = [
+      "",
+      `<!-- Auto-node keyword: ${keyword} -->`,
+      AUTO_NODE_MARKER_START,
+      "_Collecting links..._",
+      AUTO_NODE_MARKER_END,
+      "",
+    ].join("\n");
+
+    await this.app.vault.modify(file, `${body}${addition}`);
+  }
+
+  private enhanceGraphLeaves() {
+    const leaves = this.app.workspace.getLeavesOfType("graph");
+    for (const leaf of leaves) {
+      this.injectGraphFilter(leaf);
+    }
+  }
+
+  private injectGraphFilter(leaf: WorkspaceLeaf) {
+    const view: any = leaf.view;
+    const container = view?.containerEl?.querySelector?.(".graph-controls");
+    if (!container) {
+      return;
+    }
+
+    const filtersSection = container.querySelector(".graph-controls-section.filters") ?? container;
+    const list = filtersSection.querySelector(".setting-list") ?? filtersSection;
+
+    let filter = this.graphFilters.get(leaf);
+    if (!filter) {
+      filter = new GraphFilterControl(this, list as HTMLElement, leaf);
+      this.graphFilters.set(leaf, filter);
+    }
+    filter.render();
+  }
+
+  private cleanupGraphFilters() {
+    for (const filter of this.graphFilters.values()) {
+      filter.detach();
+    }
+    this.graphFilters.clear();
+  }
+
+  applyGraphFilter(leaf: WorkspaceLeaf) {
+    const view: any = leaf.view;
+    const input: HTMLInputElement | null =
+      view?.controls?.searchComponent?.inputEl ??
+      view?.searchComponent?.inputEl ??
+      view?.controlsFilter?.textComponent?.inputEl ??
+      view?.filterComponent?.inputEl ??
+      leaf.containerEl.querySelector<HTMLInputElement>("input[type=search], input[type=text]");
+
+    if (!input) {
+      return;
+    }
+
+    const current = input.value ?? "";
+    const pattern = `-"${AUTO_NODE_MARKER_START}"`;
+
+    if (this.settings.graphFilterEnabled) {
+      if (!current.includes(pattern)) {
+        const next = current.trim() ? `${current} ${pattern}` : pattern;
+        input.value = next;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } else if (current.includes(pattern)) {
+      const next = current.replace(pattern, "").replace(/\s{2,}/g, " ").trim();
+      input.value = next;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    const sidebar = leaf.containerEl.closest<HTMLElement>(".workspace-split, .mod-sidebar");
+    const previousTransition = sidebar?.style.transition;
+    if (sidebar) {
+      sidebar.style.transition = "none";
+    }
+
+    // Trigger graph refresh by emulating the "Apply" button if present
+    const applyButton = leaf.containerEl.querySelector<HTMLButtonElement>(".graph-controls-button, button.mod-cta");
+    if (applyButton) {
+      applyButton.click();
+    }
+
+    if (sidebar && previousTransition !== undefined) {
+      requestAnimationFrame(() => {
+        sidebar.style.transition = previousTransition;
+      });
+    }
   }
 
   private ensureIntroSection(content: string) {
@@ -518,6 +674,51 @@ class PromptModal extends Modal {
   onClose() {
     this.contentEl.empty();
     this.resolve(this.value);
+  }
+}
+
+class GraphFilterControl {
+  private toggle?: ToggleComponent;
+  private settingEl?: HTMLElement;
+
+  constructor(
+    private readonly plugin: AutoNodePlugin,
+    private readonly container: HTMLElement,
+    private readonly leaf: WorkspaceLeaf,
+  ) {}
+
+  render() {
+    let wrapper = this.container.querySelector<HTMLDivElement>(".auto-node-filter-wrapper");
+    if (!wrapper) {
+      wrapper = this.container.createDiv({ cls: "auto-node-filter-wrapper setting-item" });
+    } else {
+      wrapper.classList.add("auto-node-filter-wrapper", "setting-item");
+    }
+
+    wrapper.empty();
+
+    const setting = new Setting(wrapper)
+      .setName("Hide auto-nodes")
+      .setDesc("Hide notes populated automatically by Auto Node from this graph.")
+      .addToggle((toggle) => {
+        this.toggle = toggle;
+        toggle.setValue(this.plugin.settings.graphFilterEnabled);
+        toggle.onChange((value) => {
+          this.plugin.settings.graphFilterEnabled = value;
+          void this.plugin.saveSettings();
+          this.plugin.applyGraphFilter(this.leaf);
+        });
+      });
+
+    this.settingEl = setting.settingEl;
+    this.settingEl.addClass("auto-node-graph-toggle");
+    this.plugin.applyGraphFilter(this.leaf);
+  }
+
+  detach() {
+    if (this.settingEl?.isConnected) {
+      this.settingEl.remove();
+    }
   }
 }
 
