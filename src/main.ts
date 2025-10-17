@@ -37,6 +37,7 @@ const AUTO_NODE_INTRO = [
   "___",
   "",
 ].join("\n");
+const AUTO_NODE_FILTER_CLAUSE = `-"${AUTO_NODE_MARKER_START}"`;
 
 export default class AutoNodePlugin extends Plugin {
   private refreshTimeout: number | null = null;
@@ -44,6 +45,8 @@ export default class AutoNodePlugin extends Plugin {
   private settings: AutoNodeSettings = { nodes: {}, graphFilterEnabled: false };
   private nodeRecords: Map<string, AutoNodeRecord> = new Map();
   private graphFilters: Map<WorkspaceLeaf, GraphFilterControl> = new Map();
+  private graphQueries: Map<WorkspaceLeaf, string> = new Map();
+  private activeGraphToggleAnimation?: number;
 
   async onload() {
     await this.loadSettings();
@@ -529,7 +532,7 @@ export default class AutoNodePlugin extends Plugin {
     this.graphFilters.clear();
   }
 
-  applyGraphFilter(leaf: WorkspaceLeaf) {
+  applyGraphFilter(leaf: WorkspaceLeaf, explicit?: boolean) {
     const view: any = leaf.view;
     const input: HTMLInputElement | null =
       view?.controls?.searchComponent?.inputEl ??
@@ -542,37 +545,47 @@ export default class AutoNodePlugin extends Plugin {
       return;
     }
 
-    const current = input.value ?? "";
-    const pattern = `-"${AUTO_NODE_MARKER_START}"`;
+    const current = input.value ?? this.graphQueries.get(leaf) ?? "";
 
-    if (this.settings.graphFilterEnabled) {
-      if (!current.includes(pattern)) {
-        const next = current.trim() ? `${current} ${pattern}` : pattern;
-        input.value = next;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+    const shouldEnable = explicit ?? this.settings.graphFilterEnabled;
+
+    if (shouldEnable) {
+      if (!current.includes(AUTO_NODE_FILTER_CLAUSE)) {
+        const next = current.trim() ? `${current} ${AUTO_NODE_FILTER_CLAUSE}` : AUTO_NODE_FILTER_CLAUSE;
+        this.setGraphQuery(leaf, view, input, next, shouldEnable);
       }
-    } else if (current.includes(pattern)) {
-      const next = current.replace(pattern, "").replace(/\s{2,}/g, " ").trim();
-      input.value = next;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+    } else if (current.includes(AUTO_NODE_FILTER_CLAUSE)) {
+      const next = current.replace(AUTO_NODE_FILTER_CLAUSE, "").replace(/\s{2,}/g, " ").trim();
+      this.setGraphQuery(leaf, view, input, next, shouldEnable);
+    }
+  }
+
+  private setGraphQuery(leaf: WorkspaceLeaf, view: any, input: HTMLInputElement, value: string, enabled: boolean) {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    if (view?.controls?.setQuery) {
+      view.controls.setQuery(value);
+    } else if (view?.setQuery) {
+      view.setQuery(value);
     }
 
-    const sidebar = leaf.containerEl.closest<HTMLElement>(".workspace-split, .mod-sidebar");
-    const previousTransition = sidebar?.style.transition;
-    if (sidebar) {
-      sidebar.style.transition = "none";
+    const applyButton = input.closest(".graph-controls")?.querySelector<HTMLButtonElement>(
+      ".graph-controls-button, button.mod-cta, button.graph-controls-apply",
+    );
+    applyButton?.click();
+
+    if (enabled) {
+      this.graphQueries.set(leaf, value);
+    } else {
+      this.graphQueries.delete(leaf);
     }
 
-    // Trigger graph refresh by emulating the "Apply" button if present
-    const applyButton = leaf.containerEl.querySelector<HTMLButtonElement>(".graph-controls-button, button.mod-cta");
-    if (applyButton) {
-      applyButton.click();
-    }
-
-    if (sidebar && previousTransition !== undefined) {
-      requestAnimationFrame(() => {
-        sidebar.style.transition = previousTransition;
-      });
+    if (!enabled) {
+      const existing = input.value ?? "";
+      if (existing.includes(AUTO_NODE_FILTER_CLAUSE)) {
+        requestAnimationFrame(() => this.applyGraphFilter(leaf, false));
+      }
     }
   }
 
@@ -690,9 +703,9 @@ class GraphFilterControl {
   render() {
     let wrapper = this.container.querySelector<HTMLDivElement>(".auto-node-filter-wrapper");
     if (!wrapper) {
-      wrapper = this.container.createDiv({ cls: "auto-node-filter-wrapper setting-item" });
+      wrapper = this.container.createDiv({ cls: "auto-node-filter-wrapper" });
     } else {
-      wrapper.classList.add("auto-node-filter-wrapper", "setting-item");
+      wrapper.className = "auto-node-filter-wrapper";
     }
 
     wrapper.empty();
@@ -702,16 +715,20 @@ class GraphFilterControl {
       .setDesc("Hide notes populated automatically by Auto Node from this graph.")
       .addToggle((toggle) => {
         this.toggle = toggle;
-        toggle.setValue(this.plugin.settings.graphFilterEnabled);
+        toggle.setValue(this.plugin.graphQueries.get(this.leaf)?.includes(AUTO_NODE_FILTER_CLAUSE) ?? this.plugin.settings.graphFilterEnabled);
         toggle.onChange((value) => {
+          this.toggle?.toggleEl?.addClass("mod-warning");
+          window.clearTimeout(this.plugin.activeGraphToggleAnimation);
+          this.plugin.activeGraphToggleAnimation = window.setTimeout(() => {
+            this.toggle?.toggleEl?.removeClass("mod-warning");
+          }, 150);
           this.plugin.settings.graphFilterEnabled = value;
           void this.plugin.saveSettings();
-          this.plugin.applyGraphFilter(this.leaf);
+          this.plugin.applyGraphFilter(this.leaf, value);
         });
       });
 
-    this.settingEl = setting.settingEl;
-    this.settingEl.addClass("auto-node-graph-toggle");
+    setting.settingEl.addClass("setting-item", "setting-item--no-borders");
     this.plugin.applyGraphFilter(this.leaf);
   }
 
