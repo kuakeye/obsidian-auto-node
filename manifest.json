@@ -5,7 +5,10 @@
   "minAppVersion": "1.4.16",
   "description": "Automatically maintain MOC pages populated with links to notes mentioning a keyword.",
   "author": "clarkye",
-  "authorUrl": "",
+  "authorUrl": "https://paypal.me/kuakeye",
+  "fundingUrl": {
+    "PayPal": "https://paypal.me/kuakeye"
+  },
   "isDesktopOnly": false
 }
 

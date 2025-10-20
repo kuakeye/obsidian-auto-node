@@ -4,10 +4,13 @@ import {
   Modal,
   Notice,
   Plugin,
+  PluginSettingTab,
   Setting,
   TFile,
+  TextComponent,
   ToggleComponent,
   WorkspaceLeaf,
+  ButtonComponent,
   normalizePath,
   parseYaml,
   stringifyYaml,
@@ -47,10 +50,14 @@ export default class AutoNodePlugin extends Plugin {
   private graphFilters: Map<WorkspaceLeaf, GraphFilterControl> = new Map();
   private graphQueries: Map<WorkspaceLeaf, string> = new Map();
   private activeGraphToggleAnimation?: number;
+  private settingsTab?: AutoNodeSettingTab;
 
   async onload() {
     await this.loadSettings();
     console.debug(`[auto-node] Loaded ${this.nodeRecords.size} stored auto-nodes.`);
+
+    this.settingsTab = new AutoNodeSettingTab(this.app, this);
+    this.addSettingTab(this.settingsTab);
 
     this.addCommand({
       id: "create-auto-node",
@@ -124,6 +131,7 @@ export default class AutoNodePlugin extends Plugin {
     }
 
     this.cleanupGraphFilters();
+    this.settingsTab = undefined;
   }
 
   private scheduleRefresh(delay = 500) {
@@ -388,11 +396,13 @@ export default class AutoNodePlugin extends Plugin {
     const record: AutoNodeRecord = { path, ...config };
     this.nodeRecords.set(path, record);
     void this.saveSettings().catch((error) => console.error("[auto-node] Failed to save settings", error));
+    this.settingsTab?.refresh();
   }
 
   private removeAutoNodeRecord(path: string) {
     if (this.nodeRecords.delete(path)) {
       void this.saveSettings().catch((error) => console.error("[auto-node] Failed to save settings", error));
+      this.settingsTab?.refresh();
     }
   }
 
@@ -403,6 +413,7 @@ export default class AutoNodePlugin extends Plugin {
       record.path = newPath;
       this.nodeRecords.set(newPath, record);
       void this.saveSettings().catch((error) => console.error("[auto-node] Failed to save settings", error));
+      this.settingsTab?.refresh();
     }
   }
 
@@ -420,7 +431,139 @@ export default class AutoNodePlugin extends Plugin {
     const record: AutoNodeRecord = { path: file.path, ...detected };
     this.nodeRecords.set(file.path, record);
     void this.saveSettings().catch((error) => console.error("[auto-node] Failed to save settings", error));
+    this.settingsTab?.refresh();
     return record;
+  }
+
+  getAutoNodeRecords() {
+    return Array.from(this.nodeRecords.values()).sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
+  }
+
+  getAutoNodeRecord(path: string) {
+    return this.nodeRecords.get(path) ?? null;
+  }
+
+  async saveAutoNodeConfig(path: string, config: AutoNodeConfig) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Auto-node file not found at '${path}'.`);
+    }
+
+    const keyword = config.keyword.trim();
+    if (!keyword) {
+      throw new Error("Keyword cannot be empty.");
+    }
+
+    const record: AutoNodeRecord = {
+      path,
+      keyword,
+      caseSensitive: config.caseSensitive,
+      matchWholeWord: config.matchWholeWord,
+    };
+
+    this.nodeRecords.set(path, record);
+    await this.ensureAutoNodeFrontmatter(file, record);
+    await this.ensureMarkers(file, record.keyword);
+    await this.saveSettings();
+    this.settingsTab?.refresh();
+    await this.refreshAutoNode(file);
+    return record;
+  }
+
+  async renameAutoNodeFile(currentPath: string, desiredPath: string) {
+    const record = this.nodeRecords.get(currentPath);
+    if (!record) {
+      throw new Error(`Unknown auto-node record for '${currentPath}'.`);
+    }
+
+    const file = this.app.vault.getAbstractFileByPath(currentPath);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Auto-node file not found at '${currentPath}'.`);
+    }
+
+    const trimmed = desiredPath.trim();
+    if (!trimmed) {
+      throw new Error("File path cannot be empty.");
+    }
+
+    const withExtension = this.ensureMarkdownExtension(trimmed);
+    let normalized: string;
+    try {
+      normalized = normalizePath(withExtension);
+    } catch (error) {
+      console.error("[auto-node] Failed to normalize desired path", withExtension, error);
+      throw new Error("Invalid file path.");
+    }
+
+    if (normalized === currentPath) {
+      return normalized;
+    }
+
+    const existing = this.app.vault.getAbstractFileByPath(normalized);
+    if (existing) {
+      throw new Error(`A file already exists at '${normalized}'.`);
+    }
+
+    const folders = normalized.split("/");
+    folders.pop();
+    if (folders.length) {
+      const folderPath = folders.join("/");
+      await this.ensureFolder(folderPath);
+    }
+
+    await this.app.fileManager.renameFile(file, normalized);
+
+    this.nodeRecords.delete(currentPath);
+    const updated: AutoNodeRecord = {
+      path: normalized,
+      keyword: record.keyword,
+      caseSensitive: record.caseSensitive,
+      matchWholeWord: record.matchWholeWord,
+    };
+    this.nodeRecords.set(normalized, updated);
+    await this.saveSettings();
+    this.settingsTab?.refresh();
+
+    return normalized;
+  }
+
+  async deleteAutoNode(path: string) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) {
+      await this.app.vault.trash(file, true);
+    }
+    this.removeAutoNodeRecord(path);
+    this.isUpdating.delete(path);
+  }
+
+  async refreshAutoNodeByPath(path: string) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Auto-node file not found at '${path}'.`);
+    }
+    await this.refreshAutoNode(file);
+  }
+
+  private async ensureFolder(folderPath: string) {
+    if (!folderPath) {
+      return;
+    }
+
+    const parts = folderPath.split("/").filter(Boolean);
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (!existing) {
+        try {
+          await this.app.vault.createFolder(current);
+        } catch (error) {
+          if (!String(error ?? "").includes("folder already exists")) {
+            throw error;
+          }
+        }
+      }
+    }
   }
 
   private detectAutoNodeConfig(file: TFile): AutoNodeConfig | null {
@@ -728,6 +871,264 @@ class GraphFilterControl {
   detach() {
     if (this.settingEl?.isConnected) {
       this.settingEl.remove();
+    }
+  }
+}
+
+class AutoNodeSettingTab extends PluginSettingTab {
+  constructor(app: App, private readonly plugin: AutoNodePlugin) {
+    super(app, plugin);
+  }
+
+  refresh() {
+    if (this.containerEl?.isConnected) {
+      this.display();
+    }
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    containerEl.createEl("h2", { text: "Auto Node" });
+    containerEl.createEl("p", {
+      text: "Manage the auto-nodes that have been created in your vault.",
+    });
+
+    const records = this.plugin.getAutoNodeRecords();
+    if (!records.length) {
+      containerEl.createEl("p", {
+        text: "No auto-nodes found yet. Use the command palette to create one, then return here to manage it.",
+      });
+      return;
+    }
+
+    for (const record of records) {
+      this.renderRecord(containerEl, record);
+    }
+  }
+
+  private renderRecord(container: HTMLElement, record: AutoNodeRecord) {
+    let currentPath = record.path;
+
+    const row = new Setting(container)
+      .setName(record.path)
+      .setDesc("Auto-node settings");
+
+    let pathInput: TextComponent;
+    row.addText((text) => {
+      pathInput = text;
+      text.setValue(record.path);
+      text.inputEl.placeholder = "folder/My Auto Node.md";
+    });
+
+    row.addButton((button) => {
+      button.setButtonText("Rename").setCta();
+      button.onClick(async () => {
+        const desiredPath = pathInput.getValue();
+        if (!desiredPath || desiredPath === currentPath) {
+          return;
+        }
+
+        button.setDisabled(true);
+        try {
+          const renamedTo = await this.plugin.renameAutoNodeFile(currentPath, desiredPath);
+          currentPath = renamedTo;
+          row.setName(renamedTo);
+          pathInput.setValue(renamedTo);
+          new Notice(`Renamed auto-node to '${renamedTo}'.`);
+          this.refresh();
+        } catch (error) {
+          console.error("[auto-node] Failed to rename auto-node", error);
+          const message = error instanceof Error ? error.message : String(error);
+          new Notice(`Failed to rename auto-node: ${message}`);
+          pathInput.setValue(currentPath);
+        } finally {
+          button.setDisabled(false);
+        }
+      });
+    });
+
+    row.addButton((button) => {
+      button.setButtonText("Auto-node settings");
+      button.onClick(() => {
+        const modal = new AutoNodeSettingsModal(this.app, this.plugin, currentPath);
+        modal.open();
+      });
+    });
+  }
+}
+
+class AutoNodeSettingsModal extends Modal {
+  private currentPath: string;
+  private keywordInput?: TextComponent;
+  private caseToggle?: ToggleComponent;
+  private wholeWordToggle?: ToggleComponent;
+  private refreshButton?: ButtonComponent;
+  private deleteButton?: ButtonComponent;
+  private currentConfig?: AutoNodeConfig;
+
+  constructor(app: App, private readonly plugin: AutoNodePlugin, path: string) {
+    super(app);
+    this.currentPath = path;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("auto-node-settings-modal");
+
+    const heading = contentEl.createEl("h2", { text: "Auto-node settings" });
+    heading.style.marginBottom = "0.75rem";
+
+    const record = this.plugin.getAutoNodeRecord(this.currentPath);
+    if (!record) {
+      contentEl.createEl("p", { text: "Auto-node not found." });
+      return;
+    }
+
+    this.currentConfig = {
+      keyword: record.keyword,
+      caseSensitive: record.caseSensitive,
+      matchWholeWord: record.matchWholeWord,
+    };
+
+    contentEl.createEl("p", {
+      text: "Adjust matching behavior for this auto-node. Changes apply immediately.",
+    });
+
+    const keywordSetting = new Setting(contentEl)
+      .setName("Match keyword")
+      .setDesc("Notes containing this keyword are collected into the auto-node.");
+    keywordSetting.addText((text) => {
+      this.keywordInput = text;
+      text.setValue(this.currentConfig?.keyword ?? "");
+      text.inputEl.placeholder = "keyword";
+      text.inputEl.onblur = async () => {
+        if (!this.keywordInput || !this.currentConfig) {
+          return;
+        }
+        const value = this.keywordInput.getValue().trim();
+        if (!value) {
+          this.keywordInput.setValue(this.currentConfig.keyword);
+          return;
+        }
+        if (value === this.currentConfig.keyword) {
+          this.keywordInput.setValue(this.currentConfig.keyword);
+          return;
+        }
+        await this.updateConfig({ keyword: value });
+      };
+    });
+
+    const caseSetting = new Setting(contentEl)
+      .setName("Case sensitive matching")
+      .setDesc("Only match the keyword when the case exactly matches.");
+    caseSetting.addToggle((toggle) => {
+      this.caseToggle = toggle;
+      toggle.setValue(this.currentConfig?.caseSensitive ?? false);
+      toggle.onChange(async (value) => {
+        await this.updateConfig({ caseSensitive: value });
+      });
+    });
+
+    const wholeWordSetting = new Setting(contentEl)
+      .setName("Whole word matching")
+      .setDesc("Require the keyword to appear as a whole word.");
+    wholeWordSetting.addToggle((toggle) => {
+      this.wholeWordToggle = toggle;
+      toggle.setValue(this.currentConfig?.matchWholeWord ?? false);
+      toggle.onChange(async (value) => {
+        await this.updateConfig({ matchWholeWord: value });
+      });
+    });
+
+    const actionsSetting = new Setting(contentEl)
+      .setName("Actions");
+
+    actionsSetting.addButton((button) => {
+      button.setButtonText("Refresh");
+      button.onClick(async () => {
+        button.setDisabled(true);
+        try {
+          await this.plugin.refreshAutoNodeByPath(this.currentPath);
+          new Notice(`Refreshed '${this.currentPath}'.`);
+        } catch (error) {
+          console.error("[auto-node] Failed to refresh auto-node", error);
+          const message = error instanceof Error ? error.message : String(error);
+          new Notice(`Failed to refresh auto-node: ${message}`);
+        } finally {
+          button.setDisabled(false);
+        }
+      });
+      this.refreshButton = button;
+    });
+
+    actionsSetting.addButton((button) => {
+      button.setButtonText("Delete").setWarning();
+      button.onClick(async () => {
+        if (!confirm(`Delete '${this.currentPath}'? This will move the note to trash.`)) {
+          return;
+        }
+        button.setDisabled(true);
+        try {
+          await this.plugin.deleteAutoNode(this.currentPath);
+          new Notice(`Deleted '${this.currentPath}'.`);
+          this.close();
+        } catch (error) {
+          console.error("[auto-node] Failed to delete auto-node", error);
+          const message = error instanceof Error ? error.message : String(error);
+          new Notice(`Failed to delete auto-node: ${message}`);
+        } finally {
+          button.setDisabled(false);
+        }
+      });
+      this.deleteButton = button;
+    });
+
+    const footer = contentEl.createDiv({ cls: "auto-node-settings-modal-footer" });
+    const closeButton = new ButtonComponent(footer);
+    closeButton.setButtonText("Close");
+    closeButton.onClick(() => this.close());
+    closeButton.setCta();
+  }
+
+  private async updateConfig(update: Partial<AutoNodeConfig>) {
+    try {
+      const record = this.plugin.getAutoNodeRecord(this.currentPath);
+      if (!record) {
+        throw new Error("Auto-node no longer exists.");
+      }
+
+      const next: AutoNodeConfig = {
+        keyword: update.keyword ?? record.keyword,
+        caseSensitive: update.caseSensitive ?? record.caseSensitive,
+        matchWholeWord: update.matchWholeWord ?? record.matchWholeWord,
+      };
+
+      await this.plugin.saveAutoNodeConfig(this.currentPath, next);
+
+      this.currentConfig = { ...next };
+      if (this.keywordInput) {
+        this.keywordInput.setValue(next.keyword);
+      }
+      if (this.caseToggle) {
+        this.caseToggle.setValue(next.caseSensitive);
+      }
+      if (this.wholeWordToggle) {
+        this.wholeWordToggle.setValue(next.matchWholeWord);
+      }
+      if (this.refreshButton) {
+        this.refreshButton.setDisabled(false);
+      }
+      if (this.deleteButton) {
+        this.deleteButton.setDisabled(false);
+      }
+    } catch (error) {
+      console.error("[auto-node] Failed to update auto-node config", error);
+      const message = error instanceof Error ? error.message : String(error);
+      new Notice(`Failed to update auto-node: ${message}`);
+      throw error;
     }
   }
 }
