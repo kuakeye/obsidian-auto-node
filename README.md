@@ -1,6 +1,6 @@
-# Obsidian Auto Node Plugin
+# Auto Node Plugin
 
-This Obsidian plugin creates and maintains "auto-node" notes (commonly MOCs) that automatically gather links to notes mentioning a specified keyword. Set up a note once, and the plugin keeps the list up to date as your vault changes.
+This plugin creates and maintains "auto-node" notes (commonly MOCs) that automatically gather links to notes mentioning a specified keyword. Set up a note once, and the plugin keeps the list up to date as your vault changes.
 
 ## Features
 

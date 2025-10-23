@@ -1,14 +1,14 @@
 {
   "id": "auto-node",
   "name": "Auto Node",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.4.16",
   "description": "Automatically maintain MOC pages populated with links to notes mentioning a keyword.",
-  "author": "clarkye",
-  "authorUrl": "https://paypal.me/kuakeye",
+  "author": "kuakeye",
+  "authorUrl": "https://github.com/kuakeye",
   "fundingUrl": {
     "PayPal": "https://paypal.me/kuakeye"
   },
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }
 
