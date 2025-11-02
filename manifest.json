@@ -1,7 +1,7 @@
 {
   "id": "auto-node",
   "name": "Auto Node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.4.16",
   "description": "Automatically maintain MOC pages populated with links to notes mentioning a keyword.",
   "author": "kuakeye",

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-auto-node",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Obsidian plugin to automatically maintain keyword-based MOC pages",
   "main": "main.js",
   "scripts": {

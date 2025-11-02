@@ -51,13 +51,30 @@ export default class AutoNodePlugin extends Plugin {
   private graphQueries: Map<WorkspaceLeaf, string> = new Map();
   private activeGraphToggleAnimation?: number;
   private settingsTab?: AutoNodeSettingTab;
+  private cssElement?: HTMLLinkElement;
 
   async onload() {
     await this.loadSettings();
-    console.debug(`[auto-node] Loaded ${this.nodeRecords.size} stored auto-nodes.`);
 
-    this.settingsTab = new AutoNodeSettingTab(this.app, this);
-    this.addSettingTab(this.settingsTab);
+      // Load CSS using link element (proper CSS file loading)
+      try {
+        // Create a link element to load the CSS file
+        const linkElement = document.createElement('link');
+        linkElement.setAttribute('data-auto-node', 'true');
+        linkElement.rel = 'stylesheet';
+        linkElement.type = 'text/css';
+        linkElement.href = 'styles.css';
+        
+        document.head.appendChild(linkElement);
+        
+        // Store reference for cleanup
+        this.cssElement = linkElement;
+      } catch (cssError) {
+        console.error("[auto-node] Failed to load CSS:", cssError);
+      }
+
+      this.settingsTab = new AutoNodeSettingTab(this.app, this);
+      this.addSettingTab(this.settingsTab);
 
     this.addCommand({
       id: "create-auto-node",
@@ -68,7 +85,6 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof TFile && file.extension === "md") {
-          console.debug(`[auto-node] Detected modify: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -77,7 +93,6 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (file instanceof TFile && file.extension === "md") {
-          console.debug(`[auto-node] Detected create: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -86,7 +101,6 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile && file.extension === "md") {
-          console.debug(`[auto-node] Detected delete: ${file.path}`);
           this.removeAutoNodeRecord(file.path);
           this.scheduleRefresh();
         }
@@ -96,7 +110,6 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (file instanceof TFile && file.extension === "md") {
-          console.debug(`[auto-node] Detected rename: ${oldPath} -> ${file.path}`);
           this.renameAutoNodeRecord(oldPath, file.path);
           this.scheduleRefresh();
         }
@@ -106,7 +119,6 @@ export default class AutoNodePlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
         if (file instanceof TFile && file.extension === "md") {
-          console.debug(`[auto-node] Metadata changed: ${file.path}`);
           this.scheduleRefresh();
         }
       }),
@@ -122,6 +134,24 @@ export default class AutoNodePlugin extends Plugin {
         this.enhanceGraphLeaves();
       }),
     );
+
+    // Listen for when leaves are opened/activated to re-inject graph filters
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf && leaf.view.getViewType() === "graph") {
+          this.ensureGraphFilterWithRetry(leaf);
+        }
+      }),
+    );
+
+    // Also listen for when graph views are created
+    this.registerEvent(
+      this.app.workspace.on("leaf-change", (leaf) => {
+        if (leaf && leaf.view.getViewType() === "graph") {
+          this.ensureGraphFilterWithRetry(leaf);
+        }
+      }),
+    );
   }
 
   onunload() {
@@ -132,6 +162,12 @@ export default class AutoNodePlugin extends Plugin {
 
     this.cleanupGraphFilters();
     this.settingsTab = undefined;
+    
+    // Clean up CSS element
+    if (this.cssElement && this.cssElement.parentNode) {
+      this.cssElement.parentNode.removeChild(this.cssElement);
+      this.cssElement = undefined;
+    }
   }
 
   private scheduleRefresh(delay = 500) {
@@ -140,7 +176,6 @@ export default class AutoNodePlugin extends Plugin {
     }
     this.refreshTimeout = window.setTimeout(() => {
       this.refreshTimeout = null;
-      console.debug("[auto-node] Refresh timer fired");
       this.refreshAllAutoNodes().catch((err) => {
         console.error("AutoNode refresh failed", err);
         new Notice("Auto-node refresh failed. Check console for details.");
@@ -290,7 +325,6 @@ export default class AutoNodePlugin extends Plugin {
 
         const content = await this.app.vault.cachedRead(otherFile);
         if (this.containsKeyword(otherFile, content, record)) {
-          console.debug(`[auto-node] Match found in ${otherFile.path} for keyword '${record.keyword}' in ${file.path}`);
           matches.push(
             this.app.fileManager.generateMarkdownLink(
               otherFile,
@@ -305,18 +339,11 @@ export default class AutoNodePlugin extends Plugin {
         ? matches.map((link) => `- ${link}`).join("\n")
         : "_No matching notes yet._";
 
-      console.debug(
-        `[auto-node] Refresh results for ${file.path}: ${matches.length} matches`,
-      );
-
       const current = await this.app.vault.read(file);
       const next = this.mergeGeneratedSection(current, generatedSection, record.keyword);
 
       if (current !== next) {
         await this.app.vault.modify(file, next);
-        console.debug(`[auto-node] Updated generated section in ${file.path} with ${matches.length} links.`);
-      } else {
-        console.debug(`[auto-node] No changes needed for ${file.path}.`);
       }
     } finally {
       this.isUpdating.delete(file.path);
@@ -660,11 +687,19 @@ export default class AutoNodePlugin extends Plugin {
     const filtersSection = container.querySelector(".graph-controls-section.filters") ?? container;
     const list = filtersSection.querySelector(".setting-list") ?? filtersSection;
 
+    // Check if filter already exists and is properly attached
     let filter = this.graphFilters.get(leaf);
-    if (!filter) {
-      filter = new GraphFilterControl(this, list as HTMLElement, leaf);
-      this.graphFilters.set(leaf, filter);
+    if (filter && filter.settingEl?.isConnected) {
+      return;
     }
+
+    // Create or recreate the filter
+    if (filter) {
+      filter.detach();
+    }
+    
+    filter = new GraphFilterControl(this, list as HTMLElement, leaf);
+    this.graphFilters.set(leaf, filter);
     filter.render();
   }
 
@@ -673,6 +708,24 @@ export default class AutoNodePlugin extends Plugin {
       filter.detach();
     }
     this.graphFilters.clear();
+  }
+
+  private ensureGraphFilterWithRetry(leaf: WorkspaceLeaf, retries = 3) {
+    const attemptInjection = () => {
+      const view: any = leaf.view;
+      const container = view?.containerEl?.querySelector?.(".graph-controls");
+      
+      if (container) {
+        this.injectGraphFilter(leaf);
+      } else if (retries > 0) {
+        setTimeout(() => {
+          this.ensureGraphFilterWithRetry(leaf, retries - 1);
+        }, 200);
+      }
+    };
+
+    // Initial attempt with a small delay
+    setTimeout(attemptInjection, 100);
   }
 
   applyGraphFilter(leaf: WorkspaceLeaf, explicit?: boolean) {
@@ -784,24 +837,25 @@ class PromptModal extends Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
+    contentEl.addClass("auto-node-prompt-modal");
 
     const form = contentEl.createEl("form");
 
     const heading = form.createEl("h2", { text: this.options.prompt });
-    heading.style.marginBottom = "0.5rem";
+    heading.addClass("auto-node-prompt-heading");
 
     const input = form.createEl("input", {
       type: "text",
       placeholder: this.options.placeholder ?? "",
     });
-    input.style.width = "100%";
+    input.addClass("auto-node-prompt-input");
     input.focus();
 
     const submit = form.createEl("button", {
       type: "submit",
       text: this.options.cta ?? "OK",
     });
-    submit.style.marginTop = "0.75rem";
+    submit.addClass("auto-node-prompt-submit");
 
     form.onsubmit = (event) => {
       event.preventDefault();
@@ -979,7 +1033,7 @@ class AutoNodeSettingsModal extends Modal {
     contentEl.addClass("auto-node-settings-modal");
 
     const heading = contentEl.createEl("h2", { text: "Auto-node settings" });
-    heading.style.marginBottom = "0.75rem";
+    heading.addClass("auto-node-settings-heading");
 
     const record = this.plugin.getAutoNodeRecord(this.currentPath);
     if (!record) {

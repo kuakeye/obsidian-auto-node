@@ -33,6 +33,7 @@ async function build() {
   await Promise.all([
     copyFile("manifest.json", `${outdir}/manifest.json`),
     copyFile("versions.json", `${outdir}/versions.json`),
+    copyFile("src/styles.css", `${outdir}/styles.css`),
   ]);
 }
 

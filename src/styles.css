@@ -1,0 +1,19 @@
+/* Auto Node Plugin Styles */
+
+/* Prompt Modal Styles */
+.auto-node-prompt-modal .auto-node-prompt-heading {
+  margin-bottom: 0.5rem;
+}
+
+.auto-node-prompt-modal .auto-node-prompt-input {
+  width: 100%;
+}
+
+.auto-node-prompt-modal .auto-node-prompt-submit {
+  margin-top: 0.75rem;
+}
+
+/* Auto Node Settings Modal Styles */
+.auto-node-settings-modal .auto-node-settings-heading {
+  margin-bottom: 0.75rem;
+}
