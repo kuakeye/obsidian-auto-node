@@ -1,6 +1,6 @@
 import {
   App,
-  MarkdownView,
+
   Modal,
   Notice,
   Plugin,
@@ -31,6 +31,19 @@ interface AutoNodeSettings {
   graphFilterEnabled: boolean;
 }
 
+interface GraphView {
+  containerEl?: HTMLElement;
+  controls?: {
+    searchComponent?: { inputEl?: HTMLInputElement };
+    setQuery?: (q: string) => void;
+  };
+  searchComponent?: { inputEl?: HTMLInputElement };
+  controlsFilter?: { textComponent?: { inputEl?: HTMLInputElement } };
+  filterComponent?: { inputEl?: HTMLInputElement };
+  setQuery?: (q: string) => void;
+  render?: () => void;
+}
+
 const AUTO_NODE_MARKER_START = "<!-- auto-node:start -->";
 const AUTO_NODE_MARKER_END = "<!-- auto-node:end -->";
 const AUTO_NODE_INTRO = [
@@ -51,33 +64,16 @@ export default class AutoNodePlugin extends Plugin {
   private graphQueries: Map<WorkspaceLeaf, string> = new Map();
   private activeGraphToggleAnimation?: number;
   private settingsTab?: AutoNodeSettingTab;
-  private cssElement?: HTMLLinkElement;
+
 
   async onload() {
     await this.loadSettings();
 
-      // Load CSS using link element (proper CSS file loading)
-      try {
-        // Create a link element to load the CSS file
-        const linkElement = document.createElement('link');
-        linkElement.setAttribute('data-auto-node', 'true');
-        linkElement.rel = 'stylesheet';
-        linkElement.type = 'text/css';
-        linkElement.href = 'styles.css';
-        
-        document.head.appendChild(linkElement);
-        
-        // Store reference for cleanup
-        this.cssElement = linkElement;
-      } catch (cssError) {
-        console.error("[auto-node] Failed to load CSS:", cssError);
-      }
-
-      this.settingsTab = new AutoNodeSettingTab(this.app, this);
-      this.addSettingTab(this.settingsTab);
+    this.settingsTab = new AutoNodeSettingTab(this.app, this);
+    this.addSettingTab(this.settingsTab);
 
     this.addCommand({
-      id: "create-auto-node",
+      id: "create",
       name: "Create auto-node page",
       callback: () => this.handleCreateAutoNode(),
     });
@@ -162,12 +158,6 @@ export default class AutoNodePlugin extends Plugin {
 
     this.cleanupGraphFilters();
     this.settingsTab = undefined;
-    
-    // Clean up CSS element
-    if (this.cssElement && this.cssElement.parentNode) {
-      this.cssElement.parentNode.removeChild(this.cssElement);
-      this.cssElement = undefined;
-    }
   }
 
   private scheduleRefresh(delay = 500) {
@@ -557,7 +547,7 @@ export default class AutoNodePlugin extends Plugin {
   async deleteAutoNode(path: string) {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
-      await this.app.vault.trash(file, true);
+      await this.app.fileManager.trashFile(file);
     }
     this.removeAutoNodeRecord(path);
     this.isUpdating.delete(path);
@@ -585,7 +575,7 @@ export default class AutoNodePlugin extends Plugin {
         try {
           await this.app.vault.createFolder(current);
         } catch (error) {
-          if (!String(error ?? "").includes("folder already exists")) {
+          if (!(error instanceof Error ? error.message : String(error)).includes("folder already exists")) {
             throw error;
           }
         }
@@ -678,7 +668,7 @@ export default class AutoNodePlugin extends Plugin {
   }
 
   private injectGraphFilter(leaf: WorkspaceLeaf) {
-    const view: any = leaf.view;
+    const view = leaf.view as unknown as GraphView;
     const container = view?.containerEl?.querySelector?.(".graph-controls");
     if (!container) {
       return;
@@ -712,7 +702,7 @@ export default class AutoNodePlugin extends Plugin {
 
   private ensureGraphFilterWithRetry(leaf: WorkspaceLeaf, retries = 3) {
     const attemptInjection = () => {
-      const view: any = leaf.view;
+      const view = leaf.view as unknown as GraphView;
       const container = view?.containerEl?.querySelector?.(".graph-controls");
       
       if (container) {
@@ -729,7 +719,7 @@ export default class AutoNodePlugin extends Plugin {
   }
 
   applyGraphFilter(leaf: WorkspaceLeaf, explicit?: boolean) {
-    const view: any = leaf.view;
+    const view = leaf.view as unknown as GraphView;
     const input: HTMLInputElement | null =
       view?.controls?.searchComponent?.inputEl ??
       view?.searchComponent?.inputEl ??
@@ -756,7 +746,7 @@ export default class AutoNodePlugin extends Plugin {
     }
   }
 
-  private setGraphQuery(leaf: WorkspaceLeaf, view: any, input: HTMLInputElement, value: string, enabled: boolean) {
+  private setGraphQuery(leaf: WorkspaceLeaf, view: GraphView, input: HTMLInputElement, value: string, enabled: boolean) {
     input.value = value;
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
@@ -877,6 +867,46 @@ class PromptModal extends Modal {
   }
 }
 
+class ConfirmModal extends Modal {
+  private resolve!: (value: boolean) => void;
+  private confirmed = false;
+
+  constructor(app: App, private readonly message: string) {
+    super(app);
+  }
+
+  static async confirm(app: App, message: string): Promise<boolean> {
+    const modal = new ConfirmModal(app, message);
+    modal.open();
+    return new Promise<boolean>((resolve) => {
+      modal.resolve = resolve;
+    });
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("p", { text: this.message });
+    new Setting(contentEl)
+      .addButton((button) => {
+        button.setButtonText("Confirm").setWarning();
+        button.onClick(() => {
+          this.confirmed = true;
+          this.close();
+        });
+      })
+      .addButton((button) => {
+        button.setButtonText("Cancel");
+        button.onClick(() => this.close());
+      });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    this.resolve(this.confirmed);
+  }
+}
+
 class GraphFilterControl {
   private toggle?: ToggleComponent;
   private settingEl?: HTMLElement;
@@ -900,7 +930,7 @@ class GraphFilterControl {
     info.createEl("div", { cls: "setting-item-name", text: "Hide auto-nodes" });
     info.createEl("div", {
       cls: "setting-item-description",
-      text: "Hide notes populated automatically by Auto Node from this graph.",
+      text: "Hide notes populated automatically by Auto node from this graph.",
     });
 
     const control = wrapper.createDiv({ cls: "setting-item-control" });
@@ -944,7 +974,7 @@ class AutoNodeSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Auto Node" });
+    new Setting(containerEl).setName("Auto node").setHeading();
     containerEl.createEl("p", {
       text: "Manage the auto-nodes that have been created in your vault.",
     });
@@ -1032,8 +1062,7 @@ class AutoNodeSettingsModal extends Modal {
     contentEl.empty();
     contentEl.addClass("auto-node-settings-modal");
 
-    const heading = contentEl.createEl("h2", { text: "Auto-node settings" });
-    heading.addClass("auto-node-settings-heading");
+    new Setting(contentEl).setName("Auto-node settings").setHeading();
 
     const record = this.plugin.getAutoNodeRecord(this.currentPath);
     if (!record) {
@@ -1121,7 +1150,7 @@ class AutoNodeSettingsModal extends Modal {
     actionsSetting.addButton((button) => {
       button.setButtonText("Delete").setWarning();
       button.onClick(async () => {
-        if (!confirm(`Delete '${this.currentPath}'? This will move the note to trash.`)) {
+        if (!(await ConfirmModal.confirm(this.app, `Delete '${this.currentPath}'? This will move the note to trash.`))) {
           return;
         }
         button.setDisabled(true);
