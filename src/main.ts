@@ -1,6 +1,5 @@
 import {
   App,
-
   Modal,
   Notice,
   Plugin,
@@ -65,7 +64,6 @@ export default class AutoNodePlugin extends Plugin {
   private activeGraphToggleAnimation?: number;
   private settingsTab?: AutoNodeSettingTab;
 
-
   async onload() {
     await this.loadSettings();
 
@@ -75,7 +73,7 @@ export default class AutoNodePlugin extends Plugin {
     this.addCommand({
       id: "create",
       name: "Create auto-node page",
-      callback: () => this.handleCreateAutoNode(),
+      callback: () => { void this.handleCreateAutoNode(); },
     });
 
     this.registerEvent(
@@ -930,7 +928,7 @@ class GraphFilterControl {
     info.createEl("div", { cls: "setting-item-name", text: "Hide auto-nodes" });
     info.createEl("div", {
       cls: "setting-item-description",
-      text: "Hide notes populated automatically by Auto node from this graph.",
+      text: "Hide notes populated automatically by auto node from this graph.",
     });
 
     const control = wrapper.createDiv({ cls: "setting-item-control" });
