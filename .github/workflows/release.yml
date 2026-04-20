@@ -1,0 +1,92 @@
+name: Release
+
+# Triggered when a semver tag like 0.1.3 is pushed.
+# Builds the plugin and attaches main.js, manifest.json, and styles.css
+# (if present) to a GitHub Release named after the tag.
+#
+# Tag MUST match manifest.json `version` exactly, with NO 'v' prefix —
+# Obsidian's community-plugin review bot enforces this.
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Reject 'v'-prefixed tags
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            v*)
+              echo "::error::Tag '$TAG' starts with 'v'. Obsidian requires plain semver tags (e.g. 0.1.3)."
+              exit 1
+              ;;
+          esac
+
+      - name: Verify tag matches manifest.json and versions.json
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MANIFEST_VERSION=$(jq -r .version manifest.json)
+          if [ "$TAG" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag '$TAG' does not match manifest.json version '$MANIFEST_VERSION'."
+            exit 1
+          fi
+          if ! jq -e --arg v "$TAG" 'has($v)' versions.json > /dev/null; then
+            echo "::error::versions.json is missing an entry for '$TAG'."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Stage release assets
+        id: stage
+        run: |
+          mkdir -p release
+          cp build/main.js       release/main.js
+          cp build/manifest.json release/manifest.json
+          if [ -f build/styles.css ]; then
+            cp build/styles.css release/styles.css
+            echo "has_styles=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_styles=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_STYLES: ${{ steps.stage.outputs.has_styles }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS="release/main.js release/manifest.json"
+          if [ "$HAS_STYLES" = "true" ]; then
+            ASSETS="$ASSETS release/styles.css"
+          fi
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG exists — uploading assets (--clobber)."
+            gh release upload "$TAG" $ASSETS --clobber
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" $ASSETS \
+              --title "$TAG" \
+              --generate-notes
+          fi
